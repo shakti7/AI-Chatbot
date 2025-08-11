@@ -38,8 +38,17 @@ const slice = createSlice({
       state.currentId = s.id
     },
     selectSession(state, action) {
-      const id = action.payload
-      if (state.sessions[id]) state.currentId = id
+      const nextId = action.payload
+      if (!state.sessions[nextId]) return
+      const prevId = state.currentId
+      if (prevId && prevId !== nextId) {
+        const prev = state.sessions[prevId]
+        if (prev && (!prev.messages || prev.messages.length === 0)) {
+          delete state.sessions[prevId]
+          state.order = state.order.filter((id) => id !== prevId)
+        }
+      }
+      state.currentId = nextId
     },
     addMessage(state, action) {
       const { sessionId, role, content } = action.payload
