@@ -3,7 +3,6 @@ import { Provider, useDispatch, useSelector } from 'react-redux'
 import { store } from './store/store'
 import ThemeToggle from './components/ThemeToggle'
 import TypingLoader from './components/TypingLoader'
-import ArtifactPanel from './components/ArtifactPanel'
 import SidebarSessions from './components/SidebarSessions'
 import MessageMarkdown from './components/MessageMarkdown'
 import { connectSSE } from './lib/sse'
@@ -38,11 +37,8 @@ function App() {
   const backend = useBackendUrl()
   const { sessions, currentId, order } = useSelector((s) => s.sessions)
   const session = sessions[currentId]
-  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [input, setInput] = useState('')
   const abortRef = useRef(null)
-
-  const canOpenSidebar = !!session?.latestArtifact
 
   const shownMessages = useMemo(() => {
     if (!session) return []
@@ -75,7 +71,10 @@ function App() {
       { session_id: session.id, message: content },
       {
         onChunk: (t) => dispatch(appendAssistantChunk({ sessionId: session.id, text: t })),
-        onArtifact: (a) => dispatch(setLatestArtifact({ sessionId: session.id, artifact: a })),
+        onArtifact: (a) => {
+          // Keep artifact in state for potential future use, but do not show a sidebar
+          dispatch(setLatestArtifact({ sessionId: session.id, artifact: a }))
+        },
         onDone: () => dispatch(setStreaming({ sessionId: session.id, streaming: false })),
         onError: (m) => {
           dispatch(setStreaming({ sessionId: session.id, streaming: false }))
@@ -144,11 +143,6 @@ function App() {
             )}
           </div>
           <div className="flex items-center gap-2">
-            {canOpenSidebar && (
-              <button onClick={() => setSidebarOpen((s) => !s)} className="px-3 py-1.5 rounded border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900">
-                {sidebarOpen ? 'Hide' : 'View'} Generated Artifact
-              </button>
-            )}
             <ThemeToggle />
           </div>
         </header>
@@ -172,14 +166,10 @@ function App() {
                       <button onClick={() => onEditUserMessage(m.id)} className="mt-1 text-xs underline text-neutral-500">Edit</button>
                     )}
                   </div>
-                )
-              })}
+                )}
+              )}
             </div>
           </section>
-
-          <aside className={`${sidebarOpen ? 'w-[42%]' : 'w-0'} transition-all duration-200 border-l border-neutral-200 dark:border-neutral-800 overflow-hidden`}>
-            <ArtifactPanel artifact={session.latestArtifact} />
-          </aside>
         </main>
 
         <footer className="border-t border-neutral-200 dark:border-neutral-800 p-4">
