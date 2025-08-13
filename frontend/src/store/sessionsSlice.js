@@ -29,26 +29,73 @@ const createSession = (title = 'New Chat') => ({
   streaming: false,
   latestArtifact: null,
   viewPairIndex: null, // null means show all
+  history: [], // array of previous message lists (snapshots before edits)
+  historyCursor: null, // null = current; 0..history.length-1 indexes history
+  historyAnchorMessageId: null, // assistant message id created by latest edit
 })
 
-const initialSession = createSession()
+function normalizePersistedState(state) {
+  if (!state) return null
+  const cleanedOrder = (state.order || []).filter((id) => {
+    const s = state.sessions?.[id]
+    return s && Array.isArray(s.messages) && s.messages.length > 0
+  })
+  if (cleanedOrder.length === 0) return null
+  const currentId = cleanedOrder.includes(state.currentId) ? state.currentId : cleanedOrder[0]
+  const cleanedSessions = {}
+  for (const id of cleanedOrder) cleanedSessions[id] = state.sessions[id]
+  return { sessions: cleanedSessions, order: cleanedOrder, currentId }
+}
 
-const initialState = persisted || {
-  sessions: { [initialSession.id]: initialSession },
-  order: [initialSession.id],
-  currentId: initialSession.id,
+const initialState = normalizePersistedState(persisted) || {
+  sessions: {},
+  order: [],
+  currentId: null,
 }
 
 const slice = createSlice({
   name: 'sessions',
   initialState,
   reducers: {
+    startNewDraft(state) {
+      const prevId = state.currentId
+      // If the previous session is empty, remove it from the list
+      if (prevId) {
+        const prev = state.sessions[prevId]
+        if (prev && (!prev.messages || prev.messages.length === 0)) {
+          delete state.sessions[prevId]
+          state.order = state.order.filter((id) => id !== prevId)
+        }
+      }
+      state.currentId = null
+    },
     newSession(state, action) {
       const title = action.payload?.title || 'New Chat'
+      const current = state.sessions[state.currentId]
+      // If the current session exists and has no messages, reuse it instead of creating another empty session
+      if (current && (!current.messages || current.messages.length === 0)) {
+        current.title = current.title || title
+        return
+      }
       const s = createSession(title)
       state.sessions[s.id] = s
       state.order.unshift(s.id)
       state.currentId = s.id
+    },
+    renameSession(state, action) {
+      const { id, title } = action.payload
+      const s = state.sessions[id]
+      if (s) s.title = title || s.title
+    },
+    deleteSession(state, action) {
+      const id = action.payload
+      if (!state.sessions[id]) return
+      delete state.sessions[id]
+      state.order = state.order.filter((x) => x !== id)
+      if (state.currentId === id) {
+        const nextId = state.order[0] || null
+        state.currentId = nextId
+      }
     },
     selectSession(state, action) {
       const nextId = action.payload
@@ -97,6 +144,9 @@ const slice = createSlice({
       s.messages = []
       s.latestArtifact = null
       s.viewPairIndex = null
+      s.history = []
+      s.historyCursor = null
+      s.historyAnchorMessageId = null
     },
     setViewPairIndex(state, action) {
       const { sessionId, index } = action.payload
@@ -122,9 +172,35 @@ const slice = createSlice({
         state.currentId = branched.id
       } else {
         // in-place edit and truncate following messages
+        // push snapshot of the current conversation to history for back navigation
+        try {
+          const snapshot = JSON.parse(JSON.stringify(s.messages))
+          s.history.push(snapshot)
+        } catch {
+          // if deep copy fails, skip history push
+        }
         s.messages[idx].content = newContent
         s.messages = s.messages.slice(0, idx + 1)
+        s.historyCursor = null
+        s.historyAnchorMessageId = null
       }
+    },
+    setHistoryAnchorMessage(state, action) {
+      const { sessionId, messageId } = action.payload
+      const s = state.sessions[sessionId]
+      if (!s) return
+      s.historyAnchorMessageId = messageId || null
+    },
+    setHistoryCursor(state, action) {
+      const { sessionId, cursor } = action.payload
+      const s = state.sessions[sessionId]
+      if (!s) return
+      if (cursor == null) {
+        s.historyCursor = null
+        return
+      }
+      const max = s.history.length - 1
+      s.historyCursor = Math.max(0, Math.min(max, cursor))
     },
   },
 })
@@ -139,6 +215,11 @@ export const {
   resetSession,
   setViewPairIndex,
   editUserMessage,
+  setHistoryCursor,
+  setHistoryAnchorMessage,
+  renameSession,
+  deleteSession,
+  startNewDraft,
 } = slice.actions
 
 export default slice.reducer

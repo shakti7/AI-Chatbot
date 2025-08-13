@@ -13,8 +13,9 @@ import {
   setStreaming,
   appendAssistantChunk,
   setLatestArtifact,
-  setViewPairIndex,
   editUserMessage,
+  setHistoryCursor,
+  setHistoryAnchorMessage,
 } from './store/sessionsSlice'
 import './index.css'
 
@@ -41,28 +42,18 @@ function App() {
   const [editingMessageId, setEditingMessageId] = useState(null)
   const [editingText, setEditingText] = useState('')
   const abortRef = useRef(null)
+  const isStreaming = !!session?.streaming
 
-  // Ensure there's always a valid session available
-  useEffect(() => {
-    if (!session) {
-      dispatch(newSession({}))
-    }
-  }, [session, dispatch])
+  // No auto-create here; render handles empty state and will create on first send
+  useEffect(() => {}, [session])
 
   const shownMessages = useMemo(() => {
     if (!session) return []
-    if (session.viewPairIndex == null) return session.messages
-    const targetPairs = session.viewPairIndex + 1
-    const result = []
-    let userCount = 0
-    for (const m of session.messages) {
-      result.push(m)
-      if (m.role === 'assistant') {
-        if (userCount >= targetPairs) break
-      }
-      if (m.role === 'user') userCount += 1
+    if (session.historyCursor != null) {
+      const snap = session.history?.[session.historyCursor]
+      return Array.isArray(snap) ? snap : []
     }
-    return result
+    return session.messages
   }, [session])
 
   function sendMessageTo(targetSessionId, text) {
@@ -105,7 +96,14 @@ function App() {
     if (!targetSession || targetSession.streaming) return
 
     dispatch(setStreaming({ sessionId: targetSessionId, streaming: true }))
+    // Create an assistant placeholder to anchor history navigation to this response
     dispatch(appendAssistantChunk({ sessionId: targetSessionId, text: '' }))
+    // after placeholder creation, capture the last message id as anchor
+    const afterAppend = store.getState().sessions.sessions[targetSessionId]
+    const lastMessageId = afterAppend.messages[afterAppend.messages.length - 1]?.id
+    if (lastMessageId) {
+      dispatch(setHistoryAnchorMessage({ sessionId: targetSessionId, messageId: lastMessageId }))
+    }
 
     const url = `${backend}/api/chat/stream`
     abortRef.current = connectSSE(
@@ -124,11 +122,20 @@ function App() {
   }
 
   function sendMessage(text) {
-    if (!session) return
-    sendMessageTo(session.id, text)
+    const content = (text ?? input).trim()
+    if (!content) return
+    let targetId = session?.id
+    if (!targetId) {
+      // Create a new session only on first send
+      dispatch(newSession({ title: content.slice(0, 48) }))
+      const state = store.getState().sessions
+      targetId = state.currentId
+    }
+    sendMessageTo(targetId, content)
   }
 
   function stopStream() {
+    if (!session) return
     abortRef.current && abortRef.current()
     dispatch(setStreaming({ sessionId: session.id, streaming: false }))
   }
@@ -191,6 +198,11 @@ function App() {
 
         <main className="flex-1 overflow-hidden flex">
           <section className="flex-1 overflow-y-auto p-6">
+            {!session ? (
+              <div className="mx-auto w-full max-w-3xl h-full flex items-center justify-center text-neutral-500">
+                Start a new chat from the left.
+              </div>
+            ) : (
             <div className="mx-auto w-full max-w-3xl space-y-6">
               {shownMessages.map((m, idx) => {
                 const isLast = idx === shownMessages.length - 1
@@ -221,6 +233,45 @@ function App() {
                       {showLoaderInBlock && (
                         <div className="mt-2"><TypingLoader /></div>
                       )}
+                      {(() => {
+                        const hasHistory = (session?.history?.length || 0) > 0
+                        const inHistory = session?.historyCursor != null
+                        const isAnchorInCurrent = !inHistory && m.id === session.historyAnchorMessageId
+                        const isLastAssistantInHistory = inHistory && m.role === 'assistant' && idx === shownMessages.length - 1
+                        return hasHistory && (isAnchorInCurrent || isLastAssistantInHistory)
+                      })() && (
+                        <div className="mt-2 flex justify-end gap-2">
+                          <button
+                            onClick={() => {
+                              const total = session.history?.length || 0
+                              const cur = session.historyCursor
+                              if (total === 0) return
+                              if (cur == null) {
+                                dispatch(setHistoryCursor({ sessionId: session.id, cursor: total - 1 }))
+                              } else if (cur > 0) {
+                                dispatch(setHistoryCursor({ sessionId: session.id, cursor: cur - 1 }))
+                              }
+                            }}
+                            disabled={session.streaming || (session.history?.length || 0) === 0 || (session.historyCursor != null && session.historyCursor <= 0)}
+                            className={`px-2 py-1 rounded border border-neutral-300 dark:border-neutral-700 ${(session.streaming || (session.history?.length || 0) === 0 || (session.historyCursor != null && session.historyCursor <= 0)) ? 'opacity-40 cursor-not-allowed' : ''}`}
+                          >{'<'} Prev</button>
+                          <button
+                            onClick={() => {
+                              const total = session.history?.length || 0
+                              const cur = session.historyCursor
+                              if (total === 0) return
+                              if (cur == null) return
+                              if (cur < total - 1) {
+                                dispatch(setHistoryCursor({ sessionId: session.id, cursor: cur + 1 }))
+                              } else {
+                                dispatch(setHistoryCursor({ sessionId: session.id, cursor: null }))
+                              }
+                            }}
+                            disabled={session.streaming || session.historyCursor == null}
+                            className={`px-2 py-1 rounded border border-neutral-300 dark:border-neutral-700 ${(session.streaming || session.historyCursor == null) ? 'opacity-40 cursor-not-allowed' : ''}`}
+                          >Next {'>'}</button>
+                        </div>
+                      )}
                     </div>
                     {m.role === 'user' && editingMessageId !== m.id && (
                       <button onClick={() => onEditUserMessage(m.id)} className="mt-1 text-xs underline text-neutral-500">Edit</button>
@@ -229,6 +280,7 @@ function App() {
                 )}
               )}
             </div>
+            )}
           </section>
         </main>
 
@@ -242,10 +294,10 @@ function App() {
                 placeholder="Ask to build code..."
                 className="flex-1 px-3 py-2 rounded bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-800 outline-none focus:ring-2 focus:ring-emerald-600"
               />
-              {!session.streaming && (
+              {!isStreaming && (
                 <button onClick={() => sendMessage()} className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 text-white">Send</button>
               )}
-              {session.streaming && (
+              {isStreaming && (
                 <button onClick={stopStream} className="px-4 py-2 rounded bg-red-600 hover:bg-red-500 text-white">Stop</button>
               )}
             </div>
