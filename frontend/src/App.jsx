@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useMemo, useRef, useState, useEffect } from 'react'
 import { Provider, useDispatch, useSelector } from 'react-redux'
 import { store } from './store/store'
 import ThemeToggle from './components/ThemeToggle'
@@ -38,7 +38,16 @@ function App() {
   const { sessions, currentId, order } = useSelector((s) => s.sessions)
   const session = sessions[currentId]
   const [input, setInput] = useState('')
+  const [editingMessageId, setEditingMessageId] = useState(null)
+  const [editingText, setEditingText] = useState('')
   const abortRef = useRef(null)
+
+  // Ensure there's always a valid session available
+  useEffect(() => {
+    if (!session) {
+      dispatch(newSession({}))
+    }
+  }, [session, dispatch])
 
   const shownMessages = useMemo(() => {
     if (!session) return []
@@ -56,32 +65,67 @@ function App() {
     return result
   }, [session])
 
-  function sendMessage(text) {
+  function sendMessageTo(targetSessionId, text) {
     const content = (text ?? input).trim()
-    if (!content || session.streaming) return
+    if (!content) return
 
-    dispatch(addMessage({ sessionId: session.id, role: 'user', content }))
+    const currentSessions = store.getState().sessions.sessions
+    const targetSession = currentSessions[targetSessionId]
+    if (!targetSession || targetSession.streaming) return
+
+    dispatch(addMessage({ sessionId: targetSessionId, role: 'user', content }))
     setInput('')
-    dispatch(setStreaming({ sessionId: session.id, streaming: true }))
-    dispatch(appendAssistantChunk({ sessionId: session.id, text: '' }))
+    dispatch(setStreaming({ sessionId: targetSessionId, streaming: true }))
+    dispatch(appendAssistantChunk({ sessionId: targetSessionId, text: '' }))
 
     const url = `${backend}/api/chat/stream`
     abortRef.current = connectSSE(
       url,
-      { session_id: session.id, message: content },
+      { session_id: targetSessionId, message: content },
       {
-        onChunk: (t) => dispatch(appendAssistantChunk({ sessionId: session.id, text: t })),
+        onChunk: (t) => dispatch(appendAssistantChunk({ sessionId: targetSessionId, text: t })),
         onArtifact: (a) => {
-          // Keep artifact in state for potential future use, but do not show a sidebar
-          dispatch(setLatestArtifact({ sessionId: session.id, artifact: a }))
+          dispatch(setLatestArtifact({ sessionId: targetSessionId, artifact: a }))
         },
-        onDone: () => dispatch(setStreaming({ sessionId: session.id, streaming: false })),
+        onDone: () => dispatch(setStreaming({ sessionId: targetSessionId, streaming: false })),
         onError: (m) => {
-          dispatch(setStreaming({ sessionId: session.id, streaming: false }))
-          dispatch(appendAssistantChunk({ sessionId: session.id, text: `\n[Error] ${m}` }))
+          dispatch(setStreaming({ sessionId: targetSessionId, streaming: false }))
+          dispatch(appendAssistantChunk({ sessionId: targetSessionId, text: `\n[Error] ${m}` }))
         },
       },
     )
+  }
+
+  function streamAssistantForText(targetSessionId, text) {
+    const content = text.trim()
+    if (!content) return
+
+    const currentSessions = store.getState().sessions.sessions
+    const targetSession = currentSessions[targetSessionId]
+    if (!targetSession || targetSession.streaming) return
+
+    dispatch(setStreaming({ sessionId: targetSessionId, streaming: true }))
+    dispatch(appendAssistantChunk({ sessionId: targetSessionId, text: '' }))
+
+    const url = `${backend}/api/chat/stream`
+    abortRef.current = connectSSE(
+      url,
+      { session_id: targetSessionId, message: content },
+      {
+        onChunk: (t) => dispatch(appendAssistantChunk({ sessionId: targetSessionId, text: t })),
+        onArtifact: (a) => dispatch(setLatestArtifact({ sessionId: targetSessionId, artifact: a })),
+        onDone: () => dispatch(setStreaming({ sessionId: targetSessionId, streaming: false })),
+        onError: (m) => {
+          dispatch(setStreaming({ sessionId: targetSessionId, streaming: false }))
+          dispatch(appendAssistantChunk({ sessionId: targetSessionId, text: `\n[Error] ${m}` }))
+        },
+      },
+    )
+  }
+
+  function sendMessage(text) {
+    if (!session) return
+    sendMessageTo(session.id, text)
   }
 
   function stopStream() {
@@ -90,25 +134,32 @@ function App() {
   }
 
   function onEditUserMessage(messageId) {
-    const newContent = prompt('Edit your question:')
+    if (!session) return
+    const msg = session.messages.find((m) => m.id === messageId)
+    if (!msg) return
+    setEditingText(msg.content)
+    setEditingMessageId(messageId)
+  }
+
+  function cancelEdit() {
+    setEditingMessageId(null)
+    setEditingText('')
+  }
+
+  function confirmEdit() {
+    if (!editingMessageId || !session) return
+    const newContent = editingText.trim()
     if (!newContent) return
-    dispatch(editUserMessage({ sessionId: session.id, messageId, newContent, branchNewSession: true }))
+    dispatch(editUserMessage({ sessionId: session.id, messageId: editingMessageId, newContent, branchNewSession: false }))
+    // After in-place edit (which truncates following messages), stream assistant response for the edited text
+    setEditingMessageId(null)
+    setEditingText('')
     setTimeout(() => {
-      const state = store.getState().sessions
-      const current = state.sessions[state.currentId]
-      sendMessage(current.messages[current.messages.length - 1].content)
+      streamAssistantForText(session.id, newContent)
     }, 0)
   }
 
-  const pairCount = useMemo(() => {
-    if (!session) return 0
-    return session.messages.filter((m) => m.role === 'user').length
-  }, [session])
 
-  const currentIndex = session?.viewPairIndex ?? (pairCount ? pairCount - 1 : 0)
-  const showPrevNext = pairCount > 1
-  const canPrev = currentIndex > 0
-  const canNext = currentIndex < pairCount - 1
 
   return (
     <div className="h-screen w-screen flex bg-white text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
@@ -126,21 +177,12 @@ function App() {
       <div className="flex-1 flex flex-col">
         <header className="border-b border-neutral-200 dark:border-neutral-800 p-4 flex items-center justify-between gap-2">
           <div className="flex items-center gap-3">
-            <div className="text-base font-semibold tracking-tight">Zocket CodeMate</div>
-            {showPrevNext && (
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => canPrev && dispatch(setViewPairIndex({ sessionId: session.id, index: Math.max(0, currentIndex - 1) }))}
-                  disabled={!canPrev}
-                  className={`px-2 py-1 rounded border border-neutral-300 dark:border-neutral-700 ${!canPrev ? 'opacity-40 cursor-not-allowed' : ''}`}
-                >Prev</button>
-                <button
-                  onClick={() => canNext && dispatch(setViewPairIndex({ sessionId: session.id, index: Math.min(pairCount - 1, currentIndex + 1) }))}
-                  disabled={!canNext}
-                  className={`px-2 py-1 rounded border border-neutral-300 dark:border-neutral-700 ${!canNext ? 'opacity-40 cursor-not-allowed' : ''}`}
-                >Next</button>
-              </div>
-            )}
+            <button 
+              onClick={() => window.location.reload()} 
+              className="text-base font-semibold tracking-tight hover:text-emerald-400 transition-colors cursor-pointer"
+            >
+              Zocket CodeMate
+            </button>
           </div>
           <div className="flex items-center gap-2">
             <ThemeToggle />
@@ -157,12 +199,30 @@ function App() {
                   <div key={m.id} className="w-full">
                     <div className={`text-xs mb-1 ${m.role === 'user' ? 'text-blue-600 dark:text-blue-300' : 'text-emerald-600 dark:text-emerald-300'}`}>{m.role}</div>
                     <div className="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded p-3">
-                      <MessageMarkdown text={m.content} />
+                      {m.role === 'user' && editingMessageId === m.id ? (
+                        <div>
+                          <textarea
+                            value={editingText}
+                            onChange={(e) => setEditingText(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); confirmEdit() }
+                            }}
+                            className="w-full px-3 py-2 rounded bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-800 outline-none focus:ring-2 focus:ring-emerald-600 resize-y min-h-[44px]"
+                            placeholder="Edit your question..."
+                          />
+                          <div className="mt-2 flex items-center justify-end gap-2">
+                            <button onClick={cancelEdit} className="px-3 py-1.5 rounded border border-neutral-300 dark:border-neutral-800 text-neutral-700 dark:text-neutral-200">Cancel</button>
+                            <button onClick={confirmEdit} className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white">Send</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <MessageMarkdown text={m.content} />
+                      )}
                       {showLoaderInBlock && (
                         <div className="mt-2"><TypingLoader /></div>
                       )}
                     </div>
-                    {m.role === 'user' && (
+                    {m.role === 'user' && editingMessageId !== m.id && (
                       <button onClick={() => onEditUserMessage(m.id)} className="mt-1 text-xs underline text-neutral-500">Edit</button>
                     )}
                   </div>

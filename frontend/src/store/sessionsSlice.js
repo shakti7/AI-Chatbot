@@ -3,7 +3,20 @@ import { createSlice, nanoid } from '@reduxjs/toolkit'
 const persisted = (() => {
   try {
     const raw = localStorage.getItem('zocket:sessions')
-    return raw ? JSON.parse(raw) : null
+    if (!raw) return null
+    
+    const parsed = JSON.parse(raw)
+    // Validate that the persisted data has the required structure
+    if (parsed && 
+        parsed.sessions && 
+        parsed.order && 
+        parsed.currentId && 
+        parsed.sessions[parsed.currentId] &&
+        Array.isArray(parsed.order) &&
+        parsed.order.length > 0) {
+      return parsed
+    }
+    return null
   } catch {
     return null
   }
