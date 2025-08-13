@@ -5,7 +5,7 @@ import ThemeToggle from './components/ThemeToggle'
 import TypingLoader from './components/TypingLoader'
 import SidebarSessions from './components/SidebarSessions'
 import MessageMarkdown from './components/MessageMarkdown'
-import { connectSSE } from './lib/sse'
+import { connectSSE } from './lib/sse.js'
 import {
   newSession,
   selectSession,
